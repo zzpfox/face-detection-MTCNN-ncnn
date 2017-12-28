@@ -26,6 +26,9 @@ class CMtcnn
 {
 public:
     CMtcnn();
+    void LoadModel(const char* pNetStructPath, const char* pNetWeightPath
+                 , const char* rNetStructPath, const char* rNetWeightPath
+                 , const char* oNetStructPath, const char* oNetWeightPath);
     void Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox);
 
 private:
@@ -39,14 +42,14 @@ private:
     ncnn::Net m_Onet;
     ncnn::Mat m_img;
 
-    const float nms_threshold[3] = { 0.5f, 0.7f, 0.7f };
-    const float threshold[3] = { 0.6f, 0.6f, 0.6f };
-    const float mean_vals[3] = { 127.5, 127.5, 127.5 };
-    const float norm_vals[3] = { 0.0078125, 0.0078125, 0.0078125 };
-    std::vector<SBoundingBox> firstBbox_;
-    std::vector<SBoundingBox> secondBbox_;
-    std::vector<SBoundingBox> thirdBbox_;
-    std::vector<SOrderScore> firstOrderScore_, secondBboxScore_, thirdBboxScore_;
+    const float m_nmsThreshold[3] = { 0.5f, 0.7f, 0.7f };
+    const float m_threshold[3] = { 0.6f, 0.6f, 0.6f };
+    const float m_mean_vals[3] = { 127.5, 127.5, 127.5 };
+    const float m_norm_vals[3] = { 0.0078125, 0.0078125, 0.0078125 };
+    std::vector<SBoundingBox> m_firstBbox_;
+    std::vector<SBoundingBox> m_secondBbox_;
+    std::vector<SBoundingBox> m_thirdBbox_;
+    std::vector<SOrderScore> m_firstOrderScore_, m_secondBboxScore_, m_thirdBboxScore_;
     int m_ImgWidth;
     int m_ImgHeight;
 };

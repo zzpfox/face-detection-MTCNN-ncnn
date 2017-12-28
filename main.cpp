@@ -35,6 +35,7 @@ int main(int argc, char** argv)
 
     Mat frame;
     CMtcnn mtcnn;
+    mtcnn.LoadModel("det1.param", "det1.bin", "det2.param", "det2.bin", "det3.param", "det3.bin");
 
     while (1)
     {

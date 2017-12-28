@@ -13,12 +13,17 @@ bool cmpScore(SOrderScore lsh, SOrderScore rsh)
 
 CMtcnn::CMtcnn()
 {
-    m_Pnet.load_param("det1.param");
-    m_Pnet.load_model("det1.bin");
-    m_Rnet.load_param("det2.param");
-    m_Rnet.load_model("det2.bin");
-    m_Onet.load_param("det3.param");
-    m_Onet.load_model("det3.bin");
+}
+
+
+void CMtcnn::LoadModel(const char* pNetStructPath, const char* pNetWeightPath, const char* rNetStructPath, const char* rNetWeightPath, const char* oNetStructPath, const char* oNetWeightPath)
+{
+    m_Pnet.load_param(pNetStructPath);
+    m_Pnet.load_model(pNetWeightPath);
+    m_Rnet.load_param(rNetStructPath);
+    m_Rnet.load_model(rNetWeightPath);
+    m_Onet.load_param(oNetStructPath);
+    m_Onet.load_model(oNetWeightPath);
 }
 
 void CMtcnn::GenerateBbox(ncnn::Mat score, ncnn::Mat location, std::vector<SBoundingBox>& boundingBox_, std::vector<SOrderScore>& bboxScore_, float scale)
@@ -35,7 +40,7 @@ void CMtcnn::GenerateBbox(ncnn::Mat score, ncnn::Mat location, std::vector<SBoun
     {
         for (int col = 0; col<score.w; col++)
         {
-            if (*p>threshold[0])
+            if (*p>m_threshold[0])
             {
                 bbox.score = *p;
                 order.score = *p;
@@ -164,17 +169,17 @@ void CMtcnn::RefineAndSquareBbox(vector<SBoundingBox> &vecBbox, const int &heigh
 }
 void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
 {
-    firstBbox_.clear();
-    firstOrderScore_.clear();
-    secondBbox_.clear();
-    secondBboxScore_.clear();
-    thirdBbox_.clear();
-    thirdBboxScore_.clear();
+    m_firstBbox_.clear();
+    m_firstOrderScore_.clear();
+    m_secondBbox_.clear();
+    m_secondBboxScore_.clear();
+    m_thirdBbox_.clear();
+    m_thirdBboxScore_.clear();
 
     m_img = img_;
     m_ImgWidth = m_img.w;
     m_ImgHeight = m_img.h;
-    m_img.substract_mean_normalize(mean_vals, norm_vals);
+    m_img.substract_mean_normalize(m_mean_vals, m_norm_vals);
 
     float minl = m_ImgWidth<m_ImgHeight ? m_ImgWidth : m_ImgHeight;
     int MIN_DET_SIZE = 12;
@@ -211,16 +216,16 @@ void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
         std::vector<SBoundingBox> boundingBox_;
         std::vector<SOrderScore> bboxScore_;
         GenerateBbox(score_, location_, boundingBox_, bboxScore_, scales_[i]);
-        Nms(boundingBox_, bboxScore_, nms_threshold[0]);
+        Nms(boundingBox_, bboxScore_, m_nmsThreshold[0]);
 
         for (vector<SBoundingBox>::iterator it = boundingBox_.begin(); it != boundingBox_.end(); it++)
         {
             if ((*it).bExist)
             {
-                firstBbox_.push_back(*it);
+                m_firstBbox_.push_back(*it);
                 order.score = (*it).score;
                 order.oriOrder = count;
-                firstOrderScore_.push_back(order);
+                m_firstOrderScore_.push_back(order);
                 count++;
             }
         }
@@ -229,13 +234,13 @@ void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
     }
     //the first stage's nms
     if (count<1)return;
-    Nms(firstBbox_, firstOrderScore_, nms_threshold[0]);
-    RefineAndSquareBbox(firstBbox_, m_ImgHeight, m_ImgWidth);
+    Nms(m_firstBbox_, m_firstOrderScore_, m_nmsThreshold[0]);
+    RefineAndSquareBbox(m_firstBbox_, m_ImgHeight, m_ImgWidth);
     //printf("firstBbox_.size()=%d\n", firstBbox_.size());
 
     //second stage
     count = 0;
-    for (vector<SBoundingBox>::iterator it = firstBbox_.begin(); it != firstBbox_.end(); it++)
+    for (vector<SBoundingBox>::iterator it = m_firstBbox_.begin(); it != m_firstBbox_.end(); it++)
     {
         if ((*it).bExist)
         {
@@ -249,16 +254,16 @@ void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
             ncnn::Mat score, bbox;
             ex.extract("prob1", score);
             ex.extract("conv5-2", bbox);
-            if (*(score.data + score.cstep)>threshold[1])
+            if (*(score.data + score.cstep)>m_threshold[1])
             {
                 for (int channel = 0; channel<4; channel++)
                     it->regreCoord[channel] = bbox.channel(channel)[0];//*(bbox.data+channel*bbox.cstep);
                 it->area = (it->x2 - it->x1)*(it->y2 - it->y1);
                 it->score = score.channel(1)[0];//*(score.data+score.cstep);
-                secondBbox_.push_back(*it);
+                m_secondBbox_.push_back(*it);
                 order.score = it->score;
                 order.oriOrder = count++;
-                secondBboxScore_.push_back(order);
+                m_secondBboxScore_.push_back(order);
             }
             else
             {
@@ -268,12 +273,12 @@ void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
     }
     //printf("secondBbox_.size()=%d\n", secondBbox_.size());
     if (count<1)return;
-    Nms(secondBbox_, secondBboxScore_, nms_threshold[1]);
-    RefineAndSquareBbox(secondBbox_, m_ImgHeight, m_ImgWidth);
+    Nms(m_secondBbox_, m_secondBboxScore_, m_nmsThreshold[1]);
+    RefineAndSquareBbox(m_secondBbox_, m_ImgHeight, m_ImgWidth);
 
     //third stage 
     count = 0;
-    for (vector<SBoundingBox>::iterator it = secondBbox_.begin(); it != secondBbox_.end(); it++)
+    for (vector<SBoundingBox>::iterator it = m_secondBbox_.begin(); it != m_secondBbox_.end(); it++)
     {
         if ((*it).bExist)
         {
@@ -288,7 +293,7 @@ void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
             ex.extract("prob1", score);
             ex.extract("conv6-2", bbox);
             ex.extract("conv6-3", keyPoint);
-            if (score.channel(1)[0]>threshold[2])
+            if (score.channel(1)[0]>m_threshold[2])
             {
                 for (int channel = 0; channel<4; channel++)
                     it->regreCoord[channel] = bbox.channel(channel)[0];
@@ -300,10 +305,10 @@ void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
                     (it->ppoint)[num + 5] = it->y1 + (it->y2 - it->y1)*keyPoint.channel(num + 5)[0];
                 }
 
-                thirdBbox_.push_back(*it);
+                m_thirdBbox_.push_back(*it);
                 order.score = it->score;
                 order.oriOrder = count++;
-                thirdBboxScore_.push_back(order);
+                m_thirdBboxScore_.push_back(order);
             }
             else
                 (*it).bExist = false;
@@ -312,7 +317,7 @@ void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
 
     //printf("thirdBbox_.size()=%d\n", thirdBbox_.size());
     if (count<1)return;
-    RefineAndSquareBbox(thirdBbox_, m_ImgHeight, m_ImgWidth);
-    Nms(thirdBbox_, thirdBboxScore_, nms_threshold[2], "Min");
-    finalBbox_ = thirdBbox_;
+    RefineAndSquareBbox(m_thirdBbox_, m_ImgHeight, m_ImgWidth);
+    Nms(m_thirdBbox_, m_thirdBboxScore_, m_nmsThreshold[2], "Min");
+    finalBbox_ = m_thirdBbox_;
 }
