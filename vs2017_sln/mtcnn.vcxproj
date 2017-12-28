@@ -86,7 +86,7 @@
     </ClCompile>
     <Link>
       <AdditionalLibraryDirectories>C:\library\opencv-3.3.1\opencv\build\x64\vc14\lib;$(SolutionDir)/../packages/ncnn_20171225/lib/win/x64/vs2017;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ncnn.lib;opencv_world331.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ncnnd.lib;opencv_world331d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
