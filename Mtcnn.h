@@ -1,3 +1,6 @@
+#ifndef Mtcnn_h__
+#define Mtcnn_h__
+
 #include <algorithm>
 #include <vector>
 
@@ -53,3 +56,4 @@ private:
     int m_ImgWidth;
     int m_ImgHeight;
 };
+#endif // Mtcnn_h__
