@@ -8,17 +8,18 @@
 using namespace std;
 using namespace cv;
 
-void PlotDetectionResult(const Mat& frame, const std::vector<SBoundingBox>& bbox)
+void PlotDetectionResult(const Mat& frame, const std::vector<SMtcnnFace>& bbox)
 {
-    for (vector<SBoundingBox>::const_iterator it = bbox.begin(); it != bbox.end(); it++)
+    for (auto it = bbox.begin(); it != bbox.end(); it++)
     {
-        if ((*it).bExist)
+        // Plot bounding box
+        rectangle(frame, Point(it->boundingBox[0], it->boundingBox[1]),
+            Point(it->boundingBox[2], it->boundingBox[3]), Scalar(0, 0, 255), 2, 8, 0);
+
+        // Plot facial landmark
+        for (int num = 0; num < 5; num++)
         {
-            rectangle(frame, Point((*it).x1, (*it).y1), Point((*it).x2, (*it).y2), Scalar(0, 0, 255), 2, 8, 0);
-            for (int num = 0; num < 5; num++)
-            {
-                circle(frame, Point((int)*(it->ppoint + num), (int)*(it->ppoint + num + 5)), 3, Scalar(0, 255, 255), -1);
-            }
+            circle(frame, Point(it->landmark[num], it->landmark[num + 5]), 3, Scalar(0, 255, 255), -1);
         }
     }
 }
@@ -35,20 +36,32 @@ int main(int argc, char** argv)
 
     Mat frame;
     CMtcnn mtcnn;
+    bool bSetParamToMtcnn = false;
     mtcnn.LoadModel("det1.param", "det1.bin", "det2.param", "det2.bin", "det3.param", "det3.bin");
+
+    double sumMs = 0;
+    int count = 0;
 
     while (1)
     {
         cap >> frame;
+        std::vector<SMtcnnFace> finalBbox;
 
-        std::vector<SBoundingBox> finalBbox;
-        ncnn::Mat ncnn_img = ncnn::Mat::from_pixels(frame.data, ncnn::Mat::PIXEL_BGR2RGB, frame.cols, frame.rows);
+        if (!bSetParamToMtcnn && frame.cols > 0)
+        {
+            SImageFormat format(frame.cols, frame.rows, eBGR888);
+            const float faceScoreThreshold[3] = { 0.6f, 0.6f, 0.6f };
+            mtcnn.SetParam(format, 90, 0.709, faceScoreThreshold);
+            bSetParamToMtcnn = true;
+        }
 
         double t1 = (double)getTickCount();
-        mtcnn.Detect(ncnn_img, finalBbox);
+        mtcnn.Detect(frame.data, finalBbox);
         double t2 = (double)getTickCount();
         double t = 1000 * double(t2 - t1) / getTickFrequency();
-        cout << "time = " << t << " ms, FPS = " << 1000 / t << endl;
+        sumMs += t;
+        ++count;
+        cout << "time = " << t << " ms, FPS = " << 1000 / t << ", Average time = " << sumMs / count << endl;
 
         PlotDetectionResult(frame, finalBbox);
 

@@ -1,8 +1,13 @@
 #include "Mtcnn.h"
 #include "net.h"
 #include <cmath>
+#include <iostream>
 
 using namespace std;
+
+const float nmsOverlapThreshold[3] = { 0.5f, 0.7f, 0.7f };
+const float normalizeImageMean[3] = { 127.5, 127.5, 127.5 };
+const float normalizeImageScale[3] = { 0.0078125, 0.0078125, 0.0078125 };
 
 bool cmpScore(SOrderScore lsh, SOrderScore rsh)
 {
@@ -12,8 +17,23 @@ bool cmpScore(SOrderScore lsh, SOrderScore rsh)
         return false;
 }
 
-CMtcnn::CMtcnn()
+int GetNcnnImageConvertType(imageType type)
 {
+    switch (type)
+    {
+    case eBGR888:
+    default:
+        return ncnn::Mat::PIXEL_BGR2RGB;
+
+    }
+}
+
+CMtcnn::CMtcnn()
+    : m_ImgFormat(0, 0, eBGR888)
+{
+    // [TODO] - Refine naming and refactor code
+    // Re-implement from the following link
+    // https://github.com/kpzhang93/MTCNN_face_detection_alignment/tree/master/code/codes/MTCNNv1
 }
 
 
@@ -27,51 +47,261 @@ void CMtcnn::LoadModel(const char* pNetStructPath, const char* pNetWeightPath, c
     m_Onet.load_model(oNetWeightPath);
 }
 
-void CMtcnn::GenerateBbox(ncnn::Mat score, ncnn::Mat location, std::vector<SBoundingBox>& boundingBox_, std::vector<SOrderScore>& bboxScore_, float scale)
+void CMtcnn::SetParam(const SImageFormat& imgFormat, int iMinFaceSize /*= 90*/, float fPyramidFactor /*= 0.709*/, const float* faceScoreThreshold /*= NULL*/)
+{
+    m_ImgFormat = imgFormat;
+    if (faceScoreThreshold)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            m_FaceScoreThreshold[i] = faceScoreThreshold[i];
+        }
+    }
+
+    m_pyramidScale = GetPyramidScale(imgFormat.width, imgFormat.height, iMinFaceSize, fPyramidFactor);
+}
+
+std::vector<float> CMtcnn::GetPyramidScale(unsigned int width, unsigned int height, int iMinFaceSize, float fPyramidFactor)
+{
+    vector<float> retScale;
+    float minl = width < height ? width : height;
+    float MIN_DET_SIZE = 12;
+
+    float m = MIN_DET_SIZE / iMinFaceSize;
+    minl = minl * m;
+
+    while (minl > MIN_DET_SIZE)
+    {
+        if (!retScale.empty())
+        {
+            m = m * fPyramidFactor;
+        }
+
+        retScale.push_back(m);
+        minl = minl * fPyramidFactor;
+    }
+
+    return std::move(retScale);
+}
+
+void CMtcnn::ConvertToSMtcnnFace(const std::vector<SFaceProposal>& src, vector<SMtcnnFace>& dst)
+{
+    SMtcnnFace tmpFace;
+    for (auto it = src.begin(); it != src.end(); it++)
+    {
+        if (it->bExist)
+        {
+            tmpFace.score = it->score;
+            tmpFace.boundingBox[0] = it->x1;
+            tmpFace.boundingBox[1] = it->y1;
+            tmpFace.boundingBox[2] = it->x2;
+            tmpFace.boundingBox[3] = it->y2;
+
+            for (int i = 0; i < 10; ++i)
+                tmpFace.landmark[i] = (int)(it->ppoint[i]);
+
+            dst.push_back(tmpFace);
+        }
+    }
+}
+
+std::vector<SFaceProposal> CMtcnn::PNetWithPyramid(const ncnn::Mat& img, const std::vector<float> pyramidScale)
+{
+    std::vector<SFaceProposal> firstBbox;
+    std::vector<SOrderScore> firstOrderScore;
+    SOrderScore order;
+
+    for (size_t i = 0; i < m_pyramidScale.size(); ++i)
+    {
+        ncnn::Mat nnFaceScore;
+        ncnn::Mat nnFaceBoundingBox;
+        std::vector<SFaceProposal> faceRegions;
+        std::vector<SOrderScore> faceScore;
+
+        int hs = (int)ceil(m_ImgFormat.height * m_pyramidScale[i]);
+        int ws = (int)ceil(m_ImgFormat.width * m_pyramidScale[i]);
+        ncnn::Mat pyramidImg;
+        resize_bilinear(img, pyramidImg, ws, hs);
+        ncnn::Extractor ex = m_Pnet.create_extractor();
+        ex.set_light_mode(true);
+        // [TODO] - Check if need to set_num_threads
+        ex.input("data", pyramidImg);
+        ex.extract("prob1", nnFaceScore);
+        ex.extract("conv4-2", nnFaceBoundingBox);
+        ResizeFaceFromScale(nnFaceScore, nnFaceBoundingBox, faceRegions, faceScore, m_pyramidScale[i]);
+        Nms(faceRegions, faceScore, nmsOverlapThreshold[0]);
+
+        for (vector<SFaceProposal>::iterator it = faceRegions.begin(); it != faceRegions.end(); it++)
+        {
+            if ((*it).bExist)
+            {
+                firstBbox.push_back(*it);
+                order.score = (*it).score;
+                order.oriOrder = firstOrderScore.size();
+                firstOrderScore.push_back(order);
+            }
+        }
+    }
+
+    if (!firstOrderScore.empty())
+    {
+        Nms(firstBbox, firstOrderScore, nmsOverlapThreshold[0]);
+        RefineAndSquareBbox(firstBbox, m_ImgFormat.height, m_ImgFormat.width);
+    }
+
+    return std::move(firstBbox);
+}
+
+std::vector<SFaceProposal> CMtcnn::RNet(const ncnn::Mat& img, const std::vector<SFaceProposal> PNetResult)
+{
+    std::vector<SFaceProposal> secondBbox;
+    std::vector<SOrderScore> secondBboxScore;
+    SOrderScore order;
+
+    for (vector<SFaceProposal>::const_iterator it = PNetResult.begin(); it != PNetResult.end(); it++)
+    {
+        if ((*it).bExist)
+        {
+            ncnn::Mat tempImg;
+            ncnn::Mat ncnnImg24;
+            ncnn::Mat score;
+            ncnn::Mat bbox;
+
+            copy_cut_border(img, tempImg, (*it).y1, m_ImgFormat.height - (*it).y2, (*it).x1, m_ImgFormat.width - (*it).x2);
+            resize_bilinear(tempImg, ncnnImg24, 24, 24);
+            ncnn::Extractor ex = m_Rnet.create_extractor();
+            ex.set_light_mode(true);
+            // [TODO] - Check if need to set_num_threads
+            ex.input("data", ncnnImg24);
+            ex.extract("prob1", score);
+            ex.extract("conv5-2", bbox);
+
+            if (*(score.data + score.cstep)>m_FaceScoreThreshold[1])
+            {
+                SFaceProposal metadata = *it;
+
+                for (int boxAxis = 0; boxAxis < 4; boxAxis++)
+                    metadata.regreCoord[boxAxis] = bbox.channel(boxAxis)[0];    //*(bbox.data+channel*bbox.cstep);
+
+                metadata.area = (metadata.x2 - metadata.x1) * (metadata.y2 - metadata.y1);
+                metadata.score = score.channel(1)[0];   //*(score.data+score.cstep);
+                secondBbox.push_back(metadata);
+                order.score = it->score;
+                order.oriOrder = secondBboxScore.size();
+                secondBboxScore.push_back(order);
+            }
+        }
+    }
+
+    if (!secondBboxScore.empty())
+    {
+        Nms(secondBbox, secondBboxScore, nmsOverlapThreshold[1]);
+        RefineAndSquareBbox(secondBbox, m_ImgFormat.height, m_ImgFormat.width);
+    }
+
+    return std::move(secondBbox);
+}
+
+std::vector<SFaceProposal> CMtcnn::ONet(const ncnn::Mat& img, const std::vector<SFaceProposal> RNetResult)
+{
+    std::vector<SFaceProposal> thirdBbox;
+    std::vector<SOrderScore> thirdBboxScore;
+    SOrderScore order;
+
+    for (vector<SFaceProposal>::const_iterator it = RNetResult.begin(); it != RNetResult.end(); it++)
+    {
+        if ((*it).bExist)
+        {
+            ncnn::Mat tempImg;
+            ncnn::Mat ncnnImg48;
+            ncnn::Mat score;
+            ncnn::Mat bbox;
+            ncnn::Mat keyPoint;
+
+            copy_cut_border(img, tempImg, (*it).y1, m_ImgFormat.height - (*it).y2, (*it).x1, m_ImgFormat.width - (*it).x2);
+            resize_bilinear(tempImg, ncnnImg48, 48, 48);
+            ncnn::Extractor ex = m_Onet.create_extractor();
+            ex.set_light_mode(true);
+            ex.input("data", ncnnImg48);
+            ex.extract("prob1", score);
+            ex.extract("conv6-2", bbox);
+            ex.extract("conv6-3", keyPoint);
+            if (score.channel(1)[0] > m_FaceScoreThreshold[2])
+            {
+                SFaceProposal metadata = *it;
+
+                for (int channel = 0; channel < 4; channel++)
+                    metadata.regreCoord[channel] = bbox.channel(channel)[0];
+                metadata.area = (metadata.x2 - metadata.x1) * (metadata.y2 - metadata.y1);
+                metadata.score = score.channel(1)[0];
+                for (int num = 0; num < 5; num++)
+                {
+                    (metadata.ppoint)[num] = metadata.x1 + (metadata.x2 - metadata.x1) * keyPoint.channel(num)[0];
+                    (metadata.ppoint)[num + 5] = metadata.y1 + (metadata.y2 - metadata.y1) * keyPoint.channel(num + 5)[0];
+                }
+
+                thirdBbox.push_back(metadata);
+                order.score = metadata.score;
+                order.oriOrder = thirdBboxScore.size();
+                thirdBboxScore.push_back(order);
+            }
+        }
+    }
+
+    if (!thirdBboxScore.empty())
+    {
+        RefineAndSquareBbox(thirdBbox, m_ImgFormat.height, m_ImgFormat.width);
+        Nms(thirdBbox, thirdBboxScore, nmsOverlapThreshold[2], "Min");
+    }
+
+    return std::move(thirdBbox);
+}
+
+void CMtcnn::ResizeFaceFromScale(ncnn::Mat nnFaceScore, ncnn::Mat nnFaceBoundingBox, std::vector<SFaceProposal>& faceRegions, std::vector<SOrderScore>& faceScores, float scale)
 {
     int stride = 2;
     int cellsize = 12;
     int count = 0;
     //score p
-    float *p = score.channel(1);//score.data + score.cstep;
-    float *plocal = location.data;
-    SBoundingBox bbox;
+    float *p = nnFaceScore.channel(1);//score.data + score.cstep;
+    float *plocal = nnFaceBoundingBox.data;
+    SFaceProposal faceRegion;
     SOrderScore order;
-    for (int row = 0; row<score.h; row++)
+    for (int row = 0; row<nnFaceScore.h; row++)
     {
-        for (int col = 0; col<score.w; col++)
+        for (int col = 0; col<nnFaceScore.w; col++)
         {
-            if (*p>m_threshold[0])
+            if (*p > m_FaceScoreThreshold[0])
             {
-                bbox.score = *p;
+                faceRegion.score = *p;
                 order.score = *p;
-                order.oriOrder = count;
-                bbox.x1 = round((stride*col + 1) / scale);
-                bbox.y1 = round((stride*row + 1) / scale);
-                bbox.x2 = round((stride*col + 1 + cellsize) / scale);
-                bbox.y2 = round((stride*row + 1 + cellsize) / scale);
-                bbox.bExist = true;
-                bbox.area = (bbox.x2 - bbox.x1)*(bbox.y2 - bbox.y1);
-                for (int channel = 0; channel<4; channel++)
-                    bbox.regreCoord[channel] = location.channel(channel)[0];
-                boundingBox_.push_back(bbox);
-                bboxScore_.push_back(order);
-                count++;
+                order.oriOrder = count++;
+                faceRegion.x1 = round((stride*col + 1) / scale);
+                faceRegion.y1 = round((stride*row + 1) / scale);
+                faceRegion.x2 = round((stride*col + 1 + cellsize) / scale);
+                faceRegion.y2 = round((stride*row + 1 + cellsize) / scale);
+                faceRegion.bExist = true;
+                faceRegion.area = (faceRegion.x2 - faceRegion.x1)*(faceRegion.y2 - faceRegion.y1);
+                for (int channel = 0; channel < 4; channel++)
+                    faceRegion.regreCoord[channel] = nnFaceBoundingBox.channel(channel)[0];
+                faceRegions.push_back(faceRegion);
+                faceScores.push_back(order);
             }
-            p++;
-            plocal++;
+            ++p;
+            ++plocal;
         }
     }
 }
-void CMtcnn::Nms(std::vector<SBoundingBox> &boundingBox_, std::vector<SOrderScore> &bboxScore_, const float overlap_threshold, string modelname)
+
+void CMtcnn::Nms(std::vector<SFaceProposal> &faceRegions, std::vector<SOrderScore> &faceScores, const float overlap_threshold, string modelname)
 {
-    if (boundingBox_.empty())
+    if (faceRegions.empty())
     {
         return;
     }
     std::vector<int> heros;
     //sort the score
-    sort(bboxScore_.begin(), bboxScore_.end(), cmpScore);
+    sort(faceScores.begin(), faceScores.end(), cmpScore);
 
     int order = 0;
     float IOU = 0;
@@ -79,39 +309,43 @@ void CMtcnn::Nms(std::vector<SBoundingBox> &boundingBox_, std::vector<SOrderScor
     float maxY = 0;
     float minX = 0;
     float minY = 0;
-    while (bboxScore_.size()>0)
+    while (faceScores.size()>0)
     {
-        order = bboxScore_.back().oriOrder;
-        bboxScore_.pop_back();
+        order = faceScores.back().oriOrder;
+        faceScores.pop_back();
         if (order<0)continue;
-        if (boundingBox_.at(order).bExist == false) continue;
+        if (faceRegions.at(order).bExist == false) continue;
         heros.push_back(order);
-        boundingBox_.at(order).bExist = false;//delete it
+        faceRegions.at(order).bExist = false;//delete it
 
-        for (int num = 0; num<boundingBox_.size(); num++)
+        for (int num = 0; num < faceRegions.size(); num++)
         {
-            if (boundingBox_.at(num).bExist)
+            if (faceRegions.at(num).bExist)
             {
                 //the iou
-                maxX = (boundingBox_.at(num).x1>boundingBox_.at(order).x1) ? boundingBox_.at(num).x1 : boundingBox_.at(order).x1;
-                maxY = (boundingBox_.at(num).y1>boundingBox_.at(order).y1) ? boundingBox_.at(num).y1 : boundingBox_.at(order).y1;
-                minX = (boundingBox_.at(num).x2<boundingBox_.at(order).x2) ? boundingBox_.at(num).x2 : boundingBox_.at(order).x2;
-                minY = (boundingBox_.at(num).y2<boundingBox_.at(order).y2) ? boundingBox_.at(num).y2 : boundingBox_.at(order).y2;
+                maxX = (faceRegions.at(num).x1>faceRegions.at(order).x1) ? faceRegions.at(num).x1 : faceRegions.at(order).x1;
+                maxY = (faceRegions.at(num).y1>faceRegions.at(order).y1) ? faceRegions.at(num).y1 : faceRegions.at(order).y1;
+                minX = (faceRegions.at(num).x2<faceRegions.at(order).x2) ? faceRegions.at(num).x2 : faceRegions.at(order).x2;
+                minY = (faceRegions.at(num).y2<faceRegions.at(order).y2) ? faceRegions.at(num).y2 : faceRegions.at(order).y2;
+
                 //maxX1 and maxY1 reuse 
                 maxX = ((minX - maxX + 1)>0) ? (minX - maxX + 1) : 0;
                 maxY = ((minY - maxY + 1)>0) ? (minY - maxY + 1) : 0;
+
                 //IOU reuse for the area of two bbox
                 IOU = maxX * maxY;
+
                 if (!modelname.compare("Union"))
-                    IOU = IOU / (boundingBox_.at(num).area + boundingBox_.at(order).area - IOU);
+                    IOU = IOU / (faceRegions.at(num).area + faceRegions.at(order).area - IOU);
                 else if (!modelname.compare("Min"))
                 {
-                    IOU = IOU / ((boundingBox_.at(num).area<boundingBox_.at(order).area) ? boundingBox_.at(num).area : boundingBox_.at(order).area);
+                    IOU = IOU / ((faceRegions.at(num).area<faceRegions.at(order).area) ? faceRegions.at(num).area : faceRegions.at(order).area);
                 }
-                if (IOU>overlap_threshold)
+
+                if (IOU > overlap_threshold)
                 {
-                    boundingBox_.at(num).bExist = false;
-                    for (vector<SOrderScore>::iterator it = bboxScore_.begin(); it != bboxScore_.end(); it++)
+                    faceRegions.at(num).bExist = false;
+                    for (vector<SOrderScore>::iterator it = faceScores.begin(); it != faceScores.end(); it++)
                     {
                         if ((*it).oriOrder == num)
                         {
@@ -123,10 +357,12 @@ void CMtcnn::Nms(std::vector<SBoundingBox> &boundingBox_, std::vector<SOrderScor
             }
         }
     }
+
     for (int i = 0; i<heros.size(); i++)
-        boundingBox_.at(heros.at(i)).bExist = true;
+        faceRegions.at(heros.at(i)).bExist = true;
 }
-void CMtcnn::RefineAndSquareBbox(vector<SBoundingBox> &vecBbox, const int &height, const int &width)
+
+void CMtcnn::RefineAndSquareBbox(vector<SFaceProposal> &vecBbox, const int &height, const int &width)
 {
     if (vecBbox.empty())
     {
@@ -136,7 +372,7 @@ void CMtcnn::RefineAndSquareBbox(vector<SBoundingBox> &vecBbox, const int &heigh
     float bbw = 0, bbh = 0, maxSide = 0;
     float h = 0, w = 0;
     float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
-    for (vector<SBoundingBox>::iterator it = vecBbox.begin(); it != vecBbox.end(); it++)
+    for (vector<SFaceProposal>::iterator it = vecBbox.begin(); it != vecBbox.end(); it++)
     {
         if ((*it).bExist)
         {
@@ -168,157 +404,16 @@ void CMtcnn::RefineAndSquareBbox(vector<SBoundingBox> &vecBbox, const int &heigh
         }
     }
 }
-void CMtcnn::Detect(ncnn::Mat& img_, std::vector<SBoundingBox>& finalBbox_)
+
+void CMtcnn::Detect(const unsigned char* src, std::vector<SMtcnnFace>& result)
 {
-    m_firstBbox_.clear();
-    m_firstOrderScore_.clear();
-    m_secondBbox_.clear();
-    m_secondBboxScore_.clear();
-    m_thirdBbox_.clear();
-    m_thirdBboxScore_.clear();
+    ncnn::Mat ncnnImg = ncnn::Mat::from_pixels(src, GetNcnnImageConvertType(m_ImgFormat.type), m_ImgFormat.width, m_ImgFormat.height);
+    ncnnImg.substract_mean_normalize(normalizeImageMean, normalizeImageScale);
 
-    m_img = img_;
-    m_ImgWidth = m_img.w;
-    m_ImgHeight = m_img.h;
-    m_img.substract_mean_normalize(m_mean_vals, m_norm_vals);
+    std::vector<SFaceProposal> firstBbox = PNetWithPyramid(ncnnImg, m_pyramidScale);
+    std::vector<SFaceProposal> secondBbox = RNet(ncnnImg, firstBbox);
+    std::vector<SFaceProposal> thirdBbox = ONet(ncnnImg, secondBbox);
 
-    float minl = m_ImgWidth<m_ImgHeight ? m_ImgWidth : m_ImgHeight;
-    int MIN_DET_SIZE = 12;
-    int minsize = 90;
-    float m = (float)MIN_DET_SIZE / minsize;
-    minl *= m;
-    float factor = 0.709;
-    int factor_count = 0;
-    vector<float> scales_;
-    while (minl>MIN_DET_SIZE)
-    {
-        if (factor_count>0)m = m*factor;
-        scales_.push_back(m);
-        minl *= factor;
-        factor_count++;
-    }
-    SOrderScore order;
-    int count = 0;
-
-    for (size_t i = 0; i < scales_.size(); i++)
-    {
-        int hs = (int)ceil(m_ImgHeight*scales_[i]);
-        int ws = (int)ceil(m_ImgWidth*scales_[i]);
-        //ncnn::Mat in = ncnn::Mat::from_pixels_resize(image_data, ncnn::Mat::PIXEL_RGB2BGR, img_w, img_h, ws, hs);
-        ncnn::Mat in;
-        resize_bilinear(m_img, in, ws, hs);
-        //in.substract_mean_normalize(mean_vals, norm_vals);
-        ncnn::Extractor ex = m_Pnet.create_extractor();
-        ex.set_light_mode(true);
-        ex.input("data", in);
-        ncnn::Mat score_, location_;
-        ex.extract("prob1", score_);
-        ex.extract("conv4-2", location_);
-        std::vector<SBoundingBox> boundingBox_;
-        std::vector<SOrderScore> bboxScore_;
-        GenerateBbox(score_, location_, boundingBox_, bboxScore_, scales_[i]);
-        Nms(boundingBox_, bboxScore_, m_nmsThreshold[0]);
-
-        for (vector<SBoundingBox>::iterator it = boundingBox_.begin(); it != boundingBox_.end(); it++)
-        {
-            if ((*it).bExist)
-            {
-                m_firstBbox_.push_back(*it);
-                order.score = (*it).score;
-                order.oriOrder = count;
-                m_firstOrderScore_.push_back(order);
-                count++;
-            }
-        }
-        bboxScore_.clear();
-        boundingBox_.clear();
-    }
-    //the first stage's nms
-    if (count<1)return;
-    Nms(m_firstBbox_, m_firstOrderScore_, m_nmsThreshold[0]);
-    RefineAndSquareBbox(m_firstBbox_, m_ImgHeight, m_ImgWidth);
-    //printf("firstBbox_.size()=%d\n", firstBbox_.size());
-
-    //second stage
-    count = 0;
-    for (vector<SBoundingBox>::iterator it = m_firstBbox_.begin(); it != m_firstBbox_.end(); it++)
-    {
-        if ((*it).bExist)
-        {
-            ncnn::Mat tempIm;
-            copy_cut_border(m_img, tempIm, (*it).y1, m_ImgHeight - (*it).y2, (*it).x1, m_ImgWidth - (*it).x2);
-            ncnn::Mat in;
-            resize_bilinear(tempIm, in, 24, 24);
-            ncnn::Extractor ex = m_Rnet.create_extractor();
-            ex.set_light_mode(true);
-            ex.input("data", in);
-            ncnn::Mat score, bbox;
-            ex.extract("prob1", score);
-            ex.extract("conv5-2", bbox);
-            if (*(score.data + score.cstep)>m_threshold[1])
-            {
-                for (int channel = 0; channel<4; channel++)
-                    it->regreCoord[channel] = bbox.channel(channel)[0];//*(bbox.data+channel*bbox.cstep);
-                it->area = (it->x2 - it->x1)*(it->y2 - it->y1);
-                it->score = score.channel(1)[0];//*(score.data+score.cstep);
-                m_secondBbox_.push_back(*it);
-                order.score = it->score;
-                order.oriOrder = count++;
-                m_secondBboxScore_.push_back(order);
-            }
-            else
-            {
-                (*it).bExist = false;
-            }
-        }
-    }
-    //printf("secondBbox_.size()=%d\n", secondBbox_.size());
-    if (count<1)return;
-    Nms(m_secondBbox_, m_secondBboxScore_, m_nmsThreshold[1]);
-    RefineAndSquareBbox(m_secondBbox_, m_ImgHeight, m_ImgWidth);
-
-    //third stage 
-    count = 0;
-    for (vector<SBoundingBox>::iterator it = m_secondBbox_.begin(); it != m_secondBbox_.end(); it++)
-    {
-        if ((*it).bExist)
-        {
-            ncnn::Mat tempIm;
-            copy_cut_border(m_img, tempIm, (*it).y1, m_ImgHeight - (*it).y2, (*it).x1, m_ImgWidth - (*it).x2);
-            ncnn::Mat in;
-            resize_bilinear(tempIm, in, 48, 48);
-            ncnn::Extractor ex = m_Onet.create_extractor();
-            ex.set_light_mode(true);
-            ex.input("data", in);
-            ncnn::Mat score, bbox, keyPoint;
-            ex.extract("prob1", score);
-            ex.extract("conv6-2", bbox);
-            ex.extract("conv6-3", keyPoint);
-            if (score.channel(1)[0]>m_threshold[2])
-            {
-                for (int channel = 0; channel<4; channel++)
-                    it->regreCoord[channel] = bbox.channel(channel)[0];
-                it->area = (it->x2 - it->x1)*(it->y2 - it->y1);
-                it->score = score.channel(1)[0];
-                for (int num = 0; num<5; num++)
-                {
-                    (it->ppoint)[num] = it->x1 + (it->x2 - it->x1)*keyPoint.channel(num)[0];
-                    (it->ppoint)[num + 5] = it->y1 + (it->y2 - it->y1)*keyPoint.channel(num + 5)[0];
-                }
-
-                m_thirdBbox_.push_back(*it);
-                order.score = it->score;
-                order.oriOrder = count++;
-                m_thirdBboxScore_.push_back(order);
-            }
-            else
-                (*it).bExist = false;
-        }
-    }
-
-    //printf("thirdBbox_.size()=%d\n", thirdBbox_.size());
-    if (count<1)return;
-    RefineAndSquareBbox(m_thirdBbox_, m_ImgHeight, m_ImgWidth);
-    Nms(m_thirdBbox_, m_thirdBboxScore_, m_nmsThreshold[2], "Min");
-    finalBbox_ = m_thirdBbox_;
+    ConvertToSMtcnnFace(thirdBbox, result);
 }
+
