@@ -11,7 +11,7 @@ if (WIN32)
 	SET(NCNN_LIBS ${NCNN_DIR}/lib/win/x64/vs2017/ncnn.lib)
 endif (WIN32)
 
-if (UNIX)
+if (UNIX OR ARM7)
 	find_package(OpenMP)
 	
 	if (OPENMP_FOUND)
@@ -20,10 +20,19 @@ if (UNIX)
 	endif()
 
 	find_package( OpenCV REQUIRED )
-	SET(NCNN_LIBS ${NCNN_DIR}/lib/linux/x64/gcc5.4/libncnn.a)
+	if (ARM7)
+	    SET(NCNN_LIBS ${NCNN_DIR}/lib/linux/armv7l/gcc6.3/libncnn.a)
+	else ()
+	    SET(NCNN_LIBS ${NCNN_DIR}/lib/linux/x64/gcc5.4/libncnn.a)
+	endif()
 endif (UNIX)
 
-include_directories(${OPENCV_DIR}/include)
+set(CMAKE_BUILD_TYPE release)
+add_definitions(-fPIC)
+add_definitions(-Ofast)
+add_definitions(-ffast-math)
+
+include_directories(${OpenCV_DIR}/include)
 include_directories(${NCNN_DIR}/include)
 
 add_executable(mtcnn ${SRC})
