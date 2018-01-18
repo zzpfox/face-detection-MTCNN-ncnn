@@ -188,6 +188,11 @@ void ExportResultToCsv(const string& sCsvPath, const SAnalyticResult* estimation
     f.open(sCsvPath, ios::out);
 
     f << "Event Category, True positive, False Positive, False negative, Precision, Recall, F1-score" << endl;
+
+    int tp = 0;
+    int fp = 0;
+    int fn = 0;
+
     for (int i = 0; i < NUMBER_OF_WIDER_FACE_EVENT_CATEGORY; ++i)
     {
         const SAnalyticResult& result = estimationList[i];
@@ -197,8 +202,17 @@ void ExportResultToCsv(const string& sCsvPath, const SAnalyticResult* estimation
         f << i << ", " << result.truePositive << ", " 
             << result.falsePositive << ", " << result.falseNegative << ", " 
             << precision << ", " << recall << ", " << recall << endl;
+
+        tp += result.truePositive;
+        fp += result.falsePositive;
+        fn += result.falseNegative;
     }
 
+    double avgPrecision = (double)tp / (tp + fp);
+    double avgRecall = (double)tp / (tp + fn);
+    double avgF1score = 1.f / ((1.f / avgPrecision) + (1.f / avgRecall));
+    f << "Avg precision, Avg Recall, Avg F1-score" << endl;
+    f << avgPrecision << ", " << avgRecall << ", " << avgF1score << endl;
     f.close();
 }
 
