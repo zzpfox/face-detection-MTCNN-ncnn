@@ -26,12 +26,12 @@ int GetNcnnImageConvertType(imageType type)
     case eBGR888:
     default:
         return ncnn::Mat::PIXEL_BGR2RGB;
-
     }
 }
 
 CMtcnn::CMtcnn()
     : m_ImgFormat(0, 0, eBGR888)
+    , m_ThreadNum(-1)
 {
     // [TODO] - Refine naming and refactor code
     // Re-implement from the following link
@@ -49,8 +49,9 @@ void CMtcnn::LoadModel(const char* pNetStructPath, const char* pNetWeightPath, c
     m_Onet.load_model(oNetWeightPath);
 }
 
-void CMtcnn::SetParam(const SImageFormat& imgFormat, int iMinFaceSize /*= 90*/, float fPyramidFactor /*= 0.709*/, const float* faceScoreThreshold /*= NULL*/)
+void CMtcnn::SetParam(const SImageFormat& imgFormat, int iMinFaceSize /*= 90*/, float fPyramidFactor /*= 0.709*/, int iThreadNum /*= 4*/, const float* faceScoreThreshold /*= NULL*/)
 {
+    m_ThreadNum = iThreadNum;
     m_ImgFormat = imgFormat;
     if (faceScoreThreshold)
     {
@@ -126,7 +127,12 @@ std::vector<SFaceProposal> CMtcnn::PNetWithPyramid(const ncnn::Mat& img, const s
         resize_bilinear(img, pyramidImg, ws, hs);
         ncnn::Extractor ex = m_Pnet.create_extractor();
         ex.set_light_mode(true);
-        // [TODO] - Check if need to set_num_threads
+
+        if (m_ThreadNum > 0)
+        {
+            ex.set_num_threads(m_ThreadNum);
+        }
+
         ex.input("data", pyramidImg);
         ex.extract("prob1", nnFaceScore);
         ex.extract("conv4-2", nnFaceBoundingBox);
@@ -173,7 +179,12 @@ std::vector<SFaceProposal> CMtcnn::RNet(const ncnn::Mat& img, const std::vector<
             resize_bilinear(tempImg, ncnnImg24, 24, 24);
             ncnn::Extractor ex = m_Rnet.create_extractor();
             ex.set_light_mode(true);
-            // [TODO] - Check if need to set_num_threads
+
+            if (m_ThreadNum > 0)
+            {
+                ex.set_num_threads(m_ThreadNum);
+            }
+
             ex.input("data", ncnnImg24);
             ex.extract("prob1", score);
             ex.extract("conv5-2", bbox);
@@ -224,6 +235,12 @@ std::vector<SFaceProposal> CMtcnn::ONet(const ncnn::Mat& img, const std::vector<
             resize_bilinear(tempImg, ncnnImg48, 48, 48);
             ncnn::Extractor ex = m_Onet.create_extractor();
             ex.set_light_mode(true);
+
+            if (m_ThreadNum > 0)
+            {
+                ex.set_num_threads(m_ThreadNum);
+            }
+
             ex.input("data", ncnnImg48);
             ex.extract("prob1", score);
             ex.extract("conv6-2", bbox);

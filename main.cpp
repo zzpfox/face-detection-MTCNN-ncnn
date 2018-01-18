@@ -51,7 +51,7 @@ int main(int argc, char** argv)
         {
             SImageFormat format(frame.cols, frame.rows, eBGR888);
             const float faceScoreThreshold[3] = { 0.6f, 0.6f, 0.6f };
-            mtcnn.SetParam(format, 90, 0.709, faceScoreThreshold);
+            mtcnn.SetParam(format, 90, 0.709, -1, faceScoreThreshold);
             bSetParamToMtcnn = true;
         }
 
